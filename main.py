@@ -262,6 +262,20 @@ async def client_handler(reader,writer):
                         response=f"$-1\r\n"
                     writer.write(response.encode())
                     await writer.drain() 
+                elif data_list[0] == 'LPUSH': 
+                    key=data_list[1] 
+                    new_data_list=data_list[2:]
+                    if key not in data_store.keys() :
+                        data_store[key] = RedisObject(data = [],data_type='list') 
+                    redis_obj=data_store.get(key) 
+                    for new_data in new_data_list:
+                        redis_obj.data.insert(0,new_data) 
+                    print('>>>AFTER LPUSH>>>>') 
+                    print(redis_obj.data)                      
+                    n=len(redis_obj.data)    
+                    response=f':{n}\r\n'
+                    writer.write(response.encode())
+                    await writer.drain()
                 elif data_list[0] == 'RPUSH': 
                     key=data_list[1] 
                     new_data_list=data_list[2:]
@@ -280,11 +294,25 @@ async def client_handler(reader,writer):
                     key=data_list[1] 
                     start_index=int(data_list[2].strip())
                     stop_index=int(data_list[3].strip())
+                    print(">>>start=",start_index,"stop= ",stop_index)                         
                     result_list=None                   
                     if key  in data_store.keys() :                        
                         redis_obj=data_store.get(key) 
                         existing_list=redis_obj.data
-                        n=len(existing_list)  
+                        n=len(existing_list) 
+                        if start_index < 0 and start_index < -n:
+                            start_index = 0
+                            print("$$$$$$$$$START set to zero")
+                        elif stop_index <0 and stop_index < -n:
+                            stop_index =0
+                            print("$$$$$$$$$STOP set to zero")
+                        if start_index <0 and stop_index<0:
+                            start_index=n+start_index
+                            stop_index=n+stop_index
+                            print("$$$$$$$$$reset start and stop")                            
+                        elif start_index >=0 and stop_index < 0:
+                            stop_index = n+stop_index
+                        print(">>>start=",start_index,"stop= ",stop_index) 
                         if start_index >= n or start_index > stop_index:
                             response=f'*0\r\n'
                         elif stop_index >= n:
@@ -301,6 +329,29 @@ async def client_handler(reader,writer):
                     
                     print('>>>RESPONSE>>>>') 
                     print(response)                    
+                    writer.write(response.encode())
+                    await writer.drain()
+                elif data_list[0] == 'LLEN': 
+                    key=data_list[1] 
+                    length=0
+                    if key in data_store:
+                        redis_obj=data_store[key]
+                        length=len(redis_obj.data)
+                        response=f':{length}\r\n'                    
+                    else:
+                        response=f':0\r\n'
+                    writer.write(response.encode())
+                    await writer.drain()
+                elif data_list[0] == 'LPOP': 
+                    key=data_list[1] 
+                    length=0
+                    if key in data_store:
+                        redis_obj=data_store[key]
+                        ele=redis_obj.data.pop(0)
+                        length=len(ele)
+                        response=f'${length}\r\n{ele}\r\n'                    
+                    if length == 0:
+                        response=f'$-1\r\n'
                     writer.write(response.encode())
                     await writer.drain()
                 elif data_list[0] == 'XADD': 
