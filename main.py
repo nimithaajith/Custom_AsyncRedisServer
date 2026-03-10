@@ -1,6 +1,9 @@
 import asyncio
 from datetime import timezone,timedelta,datetime
 import time
+import threading
+from collections import deque,defaultdict
+
 
 
 class RedisObject():
@@ -10,6 +13,7 @@ class RedisObject():
         self.counter = counter
         self.data_type = data_type
         self.last_key=None
+        self.blocked_clients=deque() #deque object
 
     def add_data(self,data):
         self.data = data
@@ -39,6 +43,58 @@ class StreamEntry():
             print("stream entry dict")  
             print(self.entry)
         print("******Add entry finished*******")
+
+data_store={}
+xread_stream_block_que=defaultdict(list)
+
+async def blocked_client_handler():
+    print("############blocked_client_handler#############")
+    while True:
+        
+        if data_store:
+            for key in data_store:
+                if data_store[key].blocked_clients:
+                    blocked_clients=data_store[key].blocked_clients
+                    try:
+                        for client_tuple in blocked_clients:
+                            try:
+                                _,expires_on,_=client_tuple
+                                if datetime.now(timezone.utc) >= expires_on:
+                                    data_store[key].blocked_clients.remove(client_tuple)
+                                    print("******REMOVED BLPOP CLIENT*******")
+                                    # response='*-1\r\n'
+                                    # client_writer.write(response.encode())
+                                    # await client_writer.drain()
+                            except:
+                                pass 
+                    except:
+                        pass                   
+                        
+
+        await asyncio.sleep(0.5)   # check twice per second
+                    
+async def get_blpop_response(client_tuple) :
+    key =client_tuple[2]
+    redis_obj=data_store[key]
+    SERVERD=False
+    while not SERVERD:
+        if client_tuple in redis_obj.blocked_clients:
+            if client_tuple == redis_obj.blocked_clients[0] and redis_obj.data:
+                value = redis_obj.data.pop(0)
+                redis_obj.blocked_clients.popleft()
+                response=f'*2\r\n${len(key)}\r\n{key}\r\n${len(value)}\r\n{value}\r\n'   
+                SERVERD=True                                      
+                return response
+            
+
+            else:
+                await asyncio.sleep(0.01)
+        else:
+            response = '*-1\r\n'
+            return response  
+
+
+
 
 def get_milliseconds_time():
     return int(time.time() * 1000)
@@ -121,14 +177,14 @@ async def get_new_stream_key(stream_key_part1,redis_obj):
     return stream_key
     
 def get_xrange_response(redis_obj,start,end):
-    print('XRANGE STARTED>>>>>>>')
+    
     result=[]
     if start == '-':
         start = redis_obj.data[0].id
-        print(">>>Start rest to begining ::",start)
+        #start set to begining 
     if end == '+':
         end = redis_obj.data[-1].id
-        print(">>>end rest to last")
+        #end set to last
         
     starting_mst,starting_sn =get_mst_and_sn(start)
     print("START>>>",starting_mst,"   ",starting_sn)
@@ -141,12 +197,12 @@ def get_xrange_response(redis_obj,start,end):
         print('CHECKING ID>>>>>>>',stream_obj.id)   
         print(mst,"   ",sn)              
         if starting_mst is not None and starting_sn is not None and ending_mst is not None and ending_sn is not None :
-            print('all key parts exists!!!!')   
+            #'all key parts exists!!!!  
             if mst >= starting_mst and mst <= ending_mst and sn >= starting_sn and sn<= ending_sn:
                 l=len(stream_obj.entry)
                 result.append((l,stream_obj))
         elif starting_mst is not None and ending_mst is not None and starting_sn is None and ending_sn is None:
-            print('!!!!no sequence number')
+            #!!!!no sequence number'
             if all(( mst >= starting_mst, mst <= ending_mst)):
                 l=len(stream_obj.entry)
                 result.append((l,stream_obj))
@@ -164,8 +220,8 @@ def get_xrange_response(redis_obj,start,end):
     print('XRANGE COMPLETED>>>>>>>')
     return result_str   
 
-def get_xread_response(redis_obj,start):
-    print('XREAD STARTED>>>>>>>')
+def get_xread_response(key,redis_obj,start):
+    #XREAD 
     result=[]
     for stream_obj in redis_obj.data:
         l=0
@@ -174,16 +230,17 @@ def get_xread_response(redis_obj,start):
                 result.append((l,stream_obj))  
         
     n1 = len(result)
-    print("result length =",n1)
-    result_str=f'*{n1}\r\n'  
+    print("xread result length =",n1)   
+
+    result_str=f'*2\r\n${len(key)}\r\n{key}\r\n*{n1}\r\n'  
     for length,obj in result:
-        print(">>>length,obj =",length,obj)
+        #appending each entry object of the stream and number of key-value pairs
         result_str=result_str+f'*2\r\n${len(obj.id)}\r\n{obj.id}\r\n*{length*2}\r\n' 
         for k,v in obj.entry.items():
-            print(">>>>>>k,v =",k,v)
+            # appending key-value pairs of the stream entry
             result_str=result_str+f'${len(k)}\r\n{k}\r\n${len(v)}\r\n{v}\r\n'
-    print('XEAD COMPLETED>>>>>>>')
-    return result_str
+    print("RESULT = ",result_str)
+    return result_str,n1
         
 
 async def get_data_type(val):
@@ -192,271 +249,484 @@ async def get_data_type(val):
     else:
         None
 
-async def client_handler(reader,writer):
-    try:
-        print("Connected...")
-        data_store={}
-        CONNECT = True
-        while CONNECT:
-            input_query=await reader.read(1024)
-            print("Received query :",input_query)
-            if not input_query:
-                break
-            query_string=str(input_query.decode()) 
-            print("query_string :",query_string)           
-            if not query_string.startswith("*"):
-                break
-            input_tokens=query_string.splitlines()
-            print("input_tokens :",input_tokens) 
-            no_of_elements=int(input_tokens[0].lstrip('*'))               
-            print("no_of_elements :",input_tokens[0], no_of_elements) 
-            data_list=[]
-            if no_of_elements == 1:
-                if input_tokens[2] == 'PING':
-                    response=b"+PONG\r\n"
-                    writer.write(response)
-                    await writer.drain()                    
-            elif no_of_elements > 1:
-                for token in input_tokens:
-                    if len(token)>1 and token.startswith('*'):
-                        continue
-                    if token.startswith('$'):
-                        continue
-                    data_list.append(token.strip())
-                if data_list[0] == 'ECHO':
-                    if len(data_list[1:] ) > 1:
-                        echo_data=" ".join(data_list[1:])
-                    else:
-                        echo_data = data_list[1]
-                    string_length=len(echo_data)
-                    response=f"${string_length}\r\n{echo_data}\r\n"  
-                    writer.write(response.encode())
-                    await writer.drain() 
-                elif data_list[0] == 'SET':
-                    key=data_list[1]
-                    val=data_list[2]
-                    data_type = await get_data_type(val)
-                    expiry =None
-                    if len(data_list) > 3:
-                        if data_list[3] == 'PX':
-                            expiry = datetime.now(timezone.utc) + timedelta(milliseconds=int(data_list[4]))
-                        elif data_list[3] == 'EX' :
-                            expiry = datetime.now(timezone.utc) + timedelta(seconds=int(data_list[4]))
-                        
-                    data_store[key] = RedisObject(data = val,exp=expiry,data_type=data_type) 
-                    response=f"+OK\r\n"  
-                    writer.write(response.encode())
-                    await writer.drain() 
-                elif data_list[0] == 'GET': 
-                    key=data_list[1]
-                    if key in data_store.keys() :
-                        val=data_store[key].data
-                        val_length=len(val)
-                        response=f'${val_length}\r\n{val}\r\n'
-                        expiry=data_store[key].exp
-                        if expiry :
-                            if expiry < datetime.now(timezone.utc) :
-                                response = f"$-1\r\n"                       
-                            
-                    else:
-                        response=f"$-1\r\n"
-                    writer.write(response.encode())
-                    await writer.drain() 
-                elif data_list[0] == 'LPUSH': 
-                    key=data_list[1] 
-                    new_data_list=data_list[2:]
-                    if key not in data_store.keys() :
-                        data_store[key] = RedisObject(data = [],data_type='list') 
-                    redis_obj=data_store.get(key) 
-                    for new_data in new_data_list:
-                        redis_obj.data.insert(0,new_data) 
-                    print('>>>AFTER LPUSH>>>>') 
-                    print(redis_obj.data)                      
-                    n=len(redis_obj.data)    
-                    response=f':{n}\r\n'
-                    writer.write(response.encode())
-                    await writer.drain()
-                elif data_list[0] == 'RPUSH': 
-                    key=data_list[1] 
-                    new_data_list=data_list[2:]
-                    if key not in data_store.keys() :
-                        data_store[key] = RedisObject(data = [],data_type='list') 
-                    redis_obj=data_store.get(key) 
-                    for new_data in new_data_list:
-                        redis_obj.data.append(new_data) 
-                    print('>>>AFTER RPUSH>>>>') 
-                    print(redis_obj.data)                      
-                    n=len(redis_obj.data)    
-                    response=f':{n}\r\n'
-                    writer.write(response.encode())
-                    await writer.drain()
-                elif data_list[0] == 'LRANGE': 
-                    key=data_list[1] 
-                    start_index=int(data_list[2].strip())
-                    stop_index=int(data_list[3].strip())
-                    print(">>>start=",start_index,"stop= ",stop_index)                         
-                    result_list=None                   
-                    if key  in data_store.keys() :                        
-                        redis_obj=data_store.get(key) 
-                        existing_list=redis_obj.data
-                        n=len(existing_list) 
-                        if start_index < 0 and start_index < -n:
-                            start_index = 0
-                            print("$$$$$$$$$START set to zero")
-                        elif stop_index <0 and stop_index < -n:
-                            stop_index =0
-                            print("$$$$$$$$$STOP set to zero")
-                        if start_index <0 and stop_index<0:
-                            start_index=n+start_index
-                            stop_index=n+stop_index
-                            print("$$$$$$$$$reset start and stop")                            
-                        elif start_index >=0 and stop_index < 0:
-                            stop_index = n+stop_index
-                        print(">>>start=",start_index,"stop= ",stop_index) 
-                        if start_index >= n or start_index > stop_index:
-                            response=f'*0\r\n'
-                        elif stop_index >= n:
-                            stop_index=n
-                            result_list=existing_list[start_index:stop_index]
-                        else:
-                            stop_index+=1
-                            result_list=existing_list[start_index:stop_index]
-                    else:
-                        response=f'*0\r\n'
-                    if result_list is not None:
-                        length=len(result_list)
-                        response=f'*{length}\r\n'+'\r\n'.join(f'${len(item)}\r\n{item}' for item in result_list)+f'\r\n'
+
+async def xread_stream_block_handler(key,stream_key,expires_on,client_addr):
+    while True:        
+        #return response,expired
+        if datetime.now(timezone.utc) >= expires_on :
+            xread_stream_block_que[key].remove(client_addr)
+            return  f'*-1\r\n',True
+        else:
+            client_details_list=xread_stream_block_que[key]
+            if client_addr in client_details_list:
+                redis_obj=data_store[key]
+                if redis_obj.data:
+                    for stream_obj in redis_obj.data:       
+                        if stream_obj.id > stream_key:                        
+                            response,n1= get_xread_response(key,redis_obj,stream_key)                    
+                            xread_stream_block_que[key].remove(client_addr)                   
+                            return response,False                    
+        await asyncio.sleep(0.01)
+
+async def command_handler(writer,client_addr,MULTI,query_string,input_tokens):
+    input_tokens=query_string.splitlines()
+    no_of_elements=int(input_tokens[0].lstrip('*'))               
+    data_list=[]
+
+    if no_of_elements == 1:
+        if input_tokens[2] == 'PING':
+            response=f"+PONG\r\n"
+            # writer.write(response)
+            # await writer.drain()  
+            
+    elif no_of_elements > 1:
+        for token in input_tokens:
+            if len(token)>1 and token.startswith('*'):                
+                continue
+            if token.startswith('$') and token.strip() != '$':
+                continue
+            data_list.append(token.strip())
+        if data_list[0] == 'ECHO':
+            if len(data_list[1:] ) > 1:
+                echo_data=" ".join(data_list[1:])
+            else:
+                echo_data = data_list[1]
+            string_length=len(echo_data)
+            response=f"${string_length}\r\n{echo_data}\r\n"  
+            # writer.write(response.encode())
+            # await writer.drain() 
+            # print('###RESPONSE###')
+            # print(response)
+        elif data_list[0] == 'SET':
+            key=data_list[1]
+            val=data_list[2]
+            data_type = await get_data_type(val)
+            expiry =None
+            if len(data_list) > 3:
+                if data_list[3] == 'PX':
+                    expiry = datetime.now(timezone.utc) + timedelta(milliseconds=int(data_list[4]))
+                elif data_list[3] == 'EX' :
+                    expiry = datetime.now(timezone.utc) + timedelta(seconds=int(data_list[4]))
+                
+            data_store[key] = RedisObject(data = val,exp=expiry,data_type=data_type) 
+            response=f"+OK\r\n"  
+            # writer.write(response.encode())
+            # await writer.drain()             
+        elif data_list[0] == 'INCR': 
+            key =data_list[1]
+            response=None
+            if key in data_store:
+                redis_obj=data_store[key]
+                if redis_obj.data.isdigit():
+                    new_val = str(int(redis_obj.data)+1)
+                    redis_obj.data = new_val
+                    response =f':{new_val}\r\n'
+                else:
+                    response="-ERR value is not an integer or out of range\r\n"
+            else:
+                data_store[key] = RedisObject(data = '1',data_type='string') 
+                response =f':1\r\n'
+            # writer.write(response.encode())
+            # await writer.drain() 
+            
+        elif data_list[0] == 'GET': 
+            key=data_list[1]
+            if key in data_store.keys() :
+                val=data_store[key].data
+                val_length=len(val)
+                response=f'${val_length}\r\n{val}\r\n'
+                expiry=data_store[key].exp
+                if expiry :
+                    if expiry < datetime.now(timezone.utc) :
+                        response = f"$-1\r\n"                       
                     
-                    print('>>>RESPONSE>>>>') 
-                    print(response)                    
-                    writer.write(response.encode())
-                    await writer.drain()
-                elif data_list[0] == 'LLEN': 
-                    key=data_list[1] 
-                    length=0
-                    if key in data_store:
-                        redis_obj=data_store[key]
-                        length=len(redis_obj.data)
-                        response=f':{length}\r\n'                    
+            else:
+                response=f"$-1\r\n"
+            # writer.write(response.encode())
+            # await writer.drain()
+            # print('###RESPONSE###')
+            # print(response) 
+        elif data_list[0] == 'LPUSH': 
+            key=data_list[1] 
+            new_data_list=data_list[2:]
+            if key not in data_store.keys() :
+                data_store[key] = RedisObject(data = [],data_type='list') 
+            redis_obj=data_store.get(key) 
+            n=len(redis_obj.data)+len(new_data_list)  
+            if new_data_list:
+                for new_data in new_data_list:
+                    redis_obj.data.insert(0,new_data) 
+            if redis_obj.blocked_clients and redis_obj.data:
+                pass                    
+            response=f':{n}\r\n'
+            # writer.write(response.encode())
+            # await writer.drain()                                                          
+                
+        elif data_list[0] == 'RPUSH': 
+            key=data_list[1] 
+            new_data_list=data_list[2:]
+            if key not in data_store.keys() :
+                data_store[key] = RedisObject(data = [],data_type='list') 
+            redis_obj=data_store.get(key) 
+            n=len(redis_obj.data)+len(new_data_list)                   
+            if new_data_list:
+                for new_data in new_data_list:
+                    redis_obj.data.append(new_data) 
+                
+            if redis_obj.blocked_clients and redis_obj.data:
+                pass
+            response=f':{n}\r\n'
+            # writer.write(response.encode())
+            # await writer.drain()                    
+        elif data_list[0] == 'LRANGE': 
+            key=data_list[1] 
+            start_index=int(data_list[2].strip())
+            stop_index=int(data_list[3].strip())
+            print(">>>start=",start_index,"stop= ",stop_index)                         
+            result_list=None                   
+            if key  in data_store.keys() :                        
+                redis_obj=data_store.get(key) 
+                existing_list=redis_obj.data
+                n=len(existing_list) 
+                if start_index < 0 and start_index < -n:
+                    start_index = 0                            
+                elif stop_index <0 and stop_index < -n:
+                    stop_index =0                            
+                if start_index <0 and stop_index<0:
+                    start_index=n+start_index
+                    stop_index=n+stop_index                                                      
+                elif start_index >=0 and stop_index < 0:
+                    stop_index = n+stop_index
+                if start_index >= n or start_index > stop_index:
+                    response=f'*0\r\n'
+                elif stop_index >= n:
+                    stop_index=n
+                    result_list=existing_list[start_index:stop_index]
+                else:
+                    stop_index+=1
+                    result_list=existing_list[start_index:stop_index]
+            else:
+                response=f'*0\r\n'
+            if result_list is not None:
+                length=len(result_list)
+                response=f'*{length}\r\n'+'\r\n'.join(f'${len(item)}\r\n{item}' for item in result_list)+f'\r\n'
+            
+            # print('>>>RESPONSE>>>>') 
+            # print(response)                    
+            # writer.write(response.encode())
+            # await writer.drain()
+        elif data_list[0] == 'LLEN': 
+            key=data_list[1] 
+            length=0
+            if key in data_store:
+                redis_obj=data_store[key]
+                length=len(redis_obj.data)
+                response=f':{length}\r\n'                    
+            else:
+                response=f':0\r\n'
+            # print('###RESPONSE###')
+            # print(response)
+            # writer.write(response.encode())
+            # await writer.drain()
+        elif data_list[0] == 'BLPOP': 
+            key=data_list[1] 
+            waits_for=float(data_list[2]) # in seconds, 0 for infinite
+            if key in data_store:
+                redis_obj=data_store[key]
+                if redis_obj.data:
+                    # if data is available , send it to client immediately
+                    ele=redis_obj.data.pop(0)
+                    length=len(ele)
+                    response=f'*2\r\n${len(key)}\r\n{key}\r\n${length}\r\n{ele}\r\n' 
+                    print('###RESPONSE TO BLPOP CLIENT###')
+                    print(response)
+                    # writer.write(response.encode())
+                    # await writer.drain() 
+                else:
+                    # if data is not available add to blocked clients
+                    if waits_for == 0:
+                        expires_on= datetime.max.replace(tzinfo=timezone.utc) # set to infinite datetime
                     else:
-                        response=f':0\r\n'
-                    writer.write(response.encode())
-                    await writer.drain()
-                elif data_list[0] == 'LPOP': 
-                    key=data_list[1] 
-                    length=0
-                    if key in data_store:
-                        redis_obj=data_store[key]
+                        expires_on=datetime.now(timezone.utc) + timedelta(seconds=waits_for)
+                    
+                    client_tuple=tuple((writer,expires_on,key))
+                    redis_obj.blocked_clients.append(client_tuple)                              
+                    print('###add to blocked clients###')
+                    response = await get_blpop_response(client_tuple)
+                                        
+            else:
+                    data_store[key] = RedisObject(data = [],data_type='list')                             
+                    redis_obj=data_store.get(key) 
+                    if waits_for == 0:
+                        expires_on= datetime.max.replace(tzinfo=timezone.utc) # set to infinite datetime
+                    else:
+                        expires_on=datetime.now(timezone.utc) + timedelta(seconds=waits_for)
+                    
+                    client_tuple=tuple((writer,expires_on,key))
+                    redis_obj.blocked_clients.append(client_tuple)  
+                    response = await get_blpop_response(client_tuple)
+                    # response=f'$-1\r\n'
+                    # print('###RESPONSE###')
+                    # print(response)
+            if not writer.is_closing():
+                print('###RESPONSE###')
+                print(response)
+                # writer.write(response.encode())
+                # await writer.drain()
+                # print("send response>>>>>>>>>>>>>>")
+        elif data_list[0] == 'LPOP': 
+            key=data_list[1] 
+            length=0
+            n=len(data_list)
+            if key in data_store:
+                redis_obj=data_store[key]
+                
+                if redis_obj.data:
+                    if n <3 :
                         ele=redis_obj.data.pop(0)
                         length=len(ele)
-                        response=f'${length}\r\n{ele}\r\n'                    
-                    if length == 0:
-                        response=f'$-1\r\n'
-                    writer.write(response.encode())
-                    await writer.drain()
-                elif data_list[0] == 'XADD': 
-                    key=data_list[1]
-                    stream_key = data_list[2]
-                    print('key =',key,' stream key =',stream_key)                    
-                    # XADD key 0-1 foo bar
-                    #<millisecondsTime>-<sequenceNumber>
-                    AddStream = True
-                    if stream_key == '*':
-                        stream_key=str(get_milliseconds_time()) +'-*'                            
-                    stream_key_parts = str(stream_key).split('-')
-                    if key in data_store.keys() :
-                        redis_obj=data_store.get(key)   
-                        last_key=redis_obj.last_key
-                        if stream_key_parts[1].strip() != "*" :                           
-                            valid,message = await valid_stream_key(stream_key,last_key)
-                            if valid:
-                                redis_obj.last_key = stream_key 
-                            else:
-                                AddStream = False
-                        else:
-                            new_stream_key = await get_new_stream_key(stream_key_parts[0].strip(),redis_obj)
-                            stream_key = new_stream_key
-                            
-                    else:
-                        stream_key_parts = str(stream_key).split('-')
-                        stream_key_millisecondsTime = int(stream_key_parts[0].strip())
-                        if stream_key_parts[1].strip() != "*" : 
-                            stream_key_sequenceNumber = int(stream_key_parts[1].strip())
-                        else:
-                            if stream_key_millisecondsTime == 0 :
-                                stream_key = '0-1'
-                                stream_key_sequenceNumber = 1
-                            else:
-                                stream_key = str(stream_key_millisecondsTime)+'-0'
-                                stream_key_sequenceNumber = 0
-                        
-                        if stream_key_millisecondsTime == 0 and stream_key_sequenceNumber == 0:
-                            message =f'-ERR The ID specified in XADD must be greater than 0-0\r\n'
-                            AddStream = False
-                        else:
-                            data_store[key] = RedisObject(data = [],data_type='stream') 
-                            redis_obj=data_store.get(key)
-                            redis_obj.last_key=stream_key
-                        
-                    if AddStream :
-                        new_stream_entry=StreamEntry(id=stream_key)
-                        stream_entry_data=data_list[3:]
-                        i=0
-                        l=[]
-                        while i<len(stream_entry_data):                        
-                            l.append([stream_entry_data[i],stream_entry_data[i+1]])
-                            i += 2
-                        print('l =',l)
-                        print('new_stream_entry =',new_stream_entry.id, new_stream_entry.entry)
-                        new_stream_entry.add_entry(l)
-                        print('new_stream_entry =',new_stream_entry.id, new_stream_entry.entry)
-                    
-                    
-                        redis_obj.data.append(new_stream_entry)
-                        print('redis obj data')
+                        response=f'${length}\r\n{ele}\r\n'  
+                    elif n>2:
+                        pop_count=int(data_list[2])
+                        if pop_count > len(redis_obj.data):
+                            pop_count=len(redis_obj.data)
+                        popped_elements=[]
+                        for i in range(pop_count):
+                            popped_elements.append(redis_obj.data.pop(0))
+                        length=len(popped_elements)
+                        print(f'>>>Popping {pop_count} elements<<<')
+                        print(popped_elements)
+                        print(">>>remaining elements<<<<<")
                         print(redis_obj.data)
-                        response=f'${len(stream_key)}\r\n{stream_key}\r\n'  
+                        response=f'*{length}\r\n'+''.join([f'${len(ele)}\r\n{ele}\r\n' for ele in popped_elements])
+                                                            
+            if length == 0:
+                response=f'$-1\r\n'
+            # print('###RESPONSE###')
+            # print(response)
+            # writer.write(response.encode())
+            # await writer.drain()
+        elif data_list[0] == 'XADD': 
+            key=data_list[1]
+            stream_key = data_list[2]
+            # XADD key 0-1 foo bar
+            #<millisecondsTime>-<sequenceNumber>
+            AddStream = True
+            if stream_key == '*':
+                stream_key=str(get_milliseconds_time()) +'-*'                            
+            stream_key_parts = str(stream_key).split('-')
+            if key in data_store.keys() :
+                redis_obj=data_store.get(key)   
+                last_key=redis_obj.last_key
+                if stream_key_parts[1].strip() != "*" :                           
+                    valid,message = await valid_stream_key(stream_key,last_key)
+                    if valid:
+                        redis_obj.last_key = stream_key 
                     else:
-                        response = message
-                    writer.write(response.encode())
-                    await writer.drain() 
-                elif data_list[0] == 'XRANGE': 
-                    key=data_list[1] 
-                    response=''
-                    if key in data_store.keys():
-                        print(">>>>>DATA LIST <<<<<<<<") 
-                        print(data_list)
-                        start=data_list[2]
-                        stop=data_list[3]
-                        redis_obj = data_store[key]
-                        response=get_xrange_response(redis_obj,start,stop)
-                        print("start-end:::",start,stop)
-                        print(response)
-                    writer.write(response.encode()) 
-                    await writer.drain() 
-                elif data_list[0] == 'XREAD': 
-                    if data_list[1] == 'STREAMS':
-                        key=data_list[2]
-                        stream_key = data_list[3]
-                        response=''
-                        if key in data_store.keys():
-                            redis_obj = data_store[key]
-                            response=get_xread_response(redis_obj,stream_key)
-                    print(">>>>RESPONSE<<<<<")
-                    print(response)
-                    writer.write(response.encode()) 
-                    await writer.drain() 
-
-                elif data_list[0] == 'TYPE': 
-                    key=data_list[1]
-                    if key in data_store.keys() :
-                        data_type= data_store.get(key).data_type
-                        response=f'+{data_type}\r\n'
+                        AddStream = False
+                else:
+                    new_stream_key = await get_new_stream_key(stream_key_parts[0].strip(),redis_obj)
+                    stream_key = new_stream_key
+                    
+            else:
+                stream_key_parts = str(stream_key).split('-')
+                stream_key_millisecondsTime = int(stream_key_parts[0].strip())
+                if stream_key_parts[1].strip() != "*" : 
+                    stream_key_sequenceNumber = int(stream_key_parts[1].strip())
+                else:
+                    if stream_key_millisecondsTime == 0 :
+                        stream_key = '0-1'
+                        stream_key_sequenceNumber = 1
                     else:
-                        response=f'+none\r\n'
-                    writer.write(response.encode())
-                    await writer.drain()                                           
+                        stream_key = str(stream_key_millisecondsTime)+'-0'
+                        stream_key_sequenceNumber = 0
+                
+                if stream_key_millisecondsTime == 0 and stream_key_sequenceNumber == 0:
+                    message =f'-ERR The ID specified in XADD must be greater than 0-0\r\n'
+                    AddStream = False
+                else:
+                    data_store[key] = RedisObject(data = [],data_type='stream') 
+                    redis_obj=data_store.get(key)
+                    redis_obj.last_key=stream_key
+                
+            if AddStream :
+                new_stream_entry=StreamEntry(id=stream_key)
+                stream_entry_data=data_list[3:]
+                i=0
+                l=[]
+                while i<len(stream_entry_data):                        
+                    l.append([stream_entry_data[i],stream_entry_data[i+1]])
+                    i += 2
+                new_stream_entry.add_entry(l)                       
             
+                redis_obj.data.append(new_stream_entry)
+                
+                response=f'${len(stream_key)}\r\n{stream_key}\r\n'  
+            else:
+                response = message
+            # writer.write(response.encode())
+            # await writer.drain() 
+        elif data_list[0] == 'XRANGE': 
+            key=data_list[1] 
+            response=''
+            if key in data_store.keys():
+                print(">>>>>DATA LIST <<<<<<<<") 
+                print(data_list)
+                start=data_list[2]
+                stop=data_list[3]
+                redis_obj = data_store[key]
+                response=get_xrange_response(redis_obj,start,stop)
+                print("start-end:::",start,stop)
+                print(response)
+            # writer.write(response.encode()) 
+            # await writer.drain() 
+        elif data_list[0] == 'XREAD': 
+            if data_list[1].upper() == 'STREAMS':
+                xread_list=data_list[2:]
+                #keys of streams to be read from data_store
+                no_of_keys=int(len(xread_list)//2)
+                xread_dict={}
+                for i in range(no_of_keys):
+                    xread_dict[xread_list[i]] =xread_list[i+no_of_keys]
+                if xread_dict:
+                    response=f'*{no_of_keys}\r\n'
+                for key,stream_key in xread_dict.items():
+                    # key=data_list[2]
+                    # stream_key = data_list[3]
+                    # response=''
+                    print(">>>>>xread Key found<<<<",key,stream_key)
+                    key_response=''
+                    redis_obj=None
+                    if key in data_store.keys():                                
+                        redis_obj = data_store[key]
+                        key_response,_=get_xread_response(key,redis_obj,stream_key)
+                        response = response + key_response                                
+            elif data_list[1].upper() == 'BLOCK' and data_list[3].upper() == 'STREAMS':
+                block_ms=float(data_list[2])
+                key=data_list[4] 
+                stream_key=data_list[5] 
+                xread_stream_block=True
+                if key in data_store:
+                    response=f'*1\r\n'
+                    redis_obj =data_store[key]
+                    if stream_key != '$':
+                        key_response,data_len=get_xread_response(key,redis_obj,stream_key)
+                        if data_len > 0:
+                            print('$$$$$$data_list[2]=',data_list[2],' ; got response =',key_response)
+                            response = response + key_response 
+                            xread_stream_block=False
+                    else:
+                        stream_key=redis_obj.last_key
+                if xread_stream_block:
+                    #push to waiting queue and wait
+                    if data_list[2].strip() == '0':
+                        print("####INFINITE WAIT#####",client_addr)
+                        expires_on= datetime.max.replace(tzinfo=timezone.utc) # set to infinite datetime
+                    else:
+                        expires_on = datetime.now(timezone.utc)+timedelta(milliseconds=block_ms)
+                    xread_stream_block_que[key].append(client_addr)
+                    block_response,block_expired=await xread_stream_block_handler(key,stream_key,expires_on,client_addr)
+                    if not block_expired:
+                        response=f'*1\r\n'+block_response
+                    else:
+                        response=block_response               
+
+                                
+            print(">>>>RESPONSE<<<<<")
+            print(response)
+            # writer.write(response.encode()) 
+            # await writer.drain() 
+
+        elif data_list[0] == 'TYPE': 
+            key=data_list[1]
+            if key in data_store.keys() :
+                data_type= data_store.get(key).data_type
+                response=f'+{data_type}\r\n'
+            else:
+                response=f'+none\r\n'
+            # writer.write(response.encode())
+            # await writer.drain()  
+    return response                                         
+    
+
+async def client_handler(reader,writer):
+    try:
+        print("Connected...") 
+        client_addr = writer.get_extra_info('peername')       
+        CONNECT = True
+        # multi command enabled, queue to hold upcoming commands
+        MULTI=[False,deque()]
+        while CONNECT:
+            input_query=await reader.read(1024)
+            if not input_query:
+                await asyncio.sleep(0.2)
+                continue
+            query_string=str(input_query.decode()) 
+            print('RECEIVED = ',query_string)
+            input_tokens=query_string.splitlines()
+            if input_tokens[2].upper() == 'MULTI' : 
+                MULTI[0]  = True
+                response =b'+OK\r\n'
+                writer.write(response)
+                await writer.drain() 
+                continue 
+            if MULTI[0] :
+                print('status = multi enabled')                
+                if input_tokens[2].strip().upper() == 'EXEC':
+                    if len(MULTI[1]) ==0 :
+                        print('status = multi enabled,no queued command, got EXEC')
+                        response=f'*0\r\n'
+                        MULTI[0] = False
+                        writer.write(response.encode())
+                        await writer.drain()
+                        continue
+                    else:
+                        que_length=len(MULTI[1])
+                        response =f'*{que_length}\r\n'
+                        while len(MULTI[1]) > 0 :
+                            
+                            query_string=MULTI[1].popleft()
+                            input_tokens=query_string.splitlines()
+                            cmd_response = await command_handler(writer,client_addr,MULTI,query_string,input_tokens)
+                            response = response+ f'{cmd_response}'
+                        writer.write(response.encode())
+                        print("$$$$$$RESPONSE::::",response)
+                        await writer.drain() 
+                        MULTI[0]=False
+                        continue
+
+                else:
+                    if input_tokens[2].upper() == 'DISCARD' : 
+                        MULTI[0]=False
+                        MULTI[1]=deque()
+                        response=f"+OK\r\n"
+                    else:
+                        print('status = multi enabled,not EXEC')
+                        MULTI[1].append(query_string)
+                        response=f"+QUEUED\r\n"
+                    writer.write(response.encode())
+                    await writer.drain() 
+                    continue 
+            else:
+                if input_tokens[2].upper() == 'EXEC' :                
+                    response=b'-ERR EXEC without MULTI\r\n' 
+                    writer.write(response)
+                    await writer.drain() 
+                    continue 
+                if input_tokens[2].upper() == 'DISCARD' :                
+                    response=b'-ERR DISCARD without MULTI\r\n' 
+                    writer.write(response)
+                    await writer.drain() 
+                    continue  
+                            
+                
+            if not query_string.startswith("*"):
+                await asyncio.sleep(0.2)
+                continue
+            print("Calling command handler main")
+            response = await command_handler(writer,client_addr,MULTI,query_string,input_tokens)
+            writer.write(response.encode())
+            await writer.drain() 
             if not CONNECT:
                 break
                 
@@ -471,6 +741,7 @@ async def run_server():
     try:
         redis_server=await asyncio.start_server(client_handler,host="localhost",port=6379)
         print(f'Redis server listening {redis_server.sockets[0].getsockname()}')
+        asyncio.create_task(blocked_client_handler())                    
         await redis_server.serve_forever()
     except Exception as e:
         print("Server execution failed : Error ->",str(e))
