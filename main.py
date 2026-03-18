@@ -4,8 +4,16 @@ import time
 import threading
 from collections import deque,defaultdict
 
+class RedisServer():
+    def __init__(self,role='master',port=6379):
+        self.port= port
+        self.role = role
+        self.master_replid = ''
+        self.master_repl_offset=None
+        self.master_host=None
+        self.master_port=None
 
-
+RedisAsyncServer=RedisServer()
 class RedisObject():
     def __init__(self,data=None,data_type=None,exp=None,counter=0):
         self.data = data
@@ -662,8 +670,27 @@ async def client_handler(reader,writer):
                 await asyncio.sleep(0.2)
                 continue
             query_string=str(input_query.decode()) 
-            print('RECEIVED = ',query_string)
+            # print('RECEIVED = ',query_string)
             input_tokens=query_string.splitlines()
+            if 'info' in input_tokens or 'INFO' in input_tokens:
+                if 'replication' in input_tokens:
+                    role=RedisAsyncServer.role
+                    
+                    length=5+len(role)
+                    
+                    if role == 'master' :
+                        sec2='master_replid:'+RedisAsyncServer.master_replid
+                        print('sec2 =',sec2)
+                        sec3='master_repl_offset:'+str(RedisAsyncServer.master_repl_offset)
+                        print('sec3 =',sec3)
+                        master_resp=f'role:{role}\r\n{sec2}\r\n{sec3}\r\n'
+                        response = f'${len(master_resp)}\r\n' + master_resp + f'\r\n'
+                    else:
+                        response=f'${length}\r\nrole:{role}\r\n'
+                    print("RESPONSE = ", response)
+                    writer.write(response.encode())
+                    await writer.drain() 
+                    continue 
             if input_tokens[2].upper() == 'MULTI' : 
                 MULTI[0]  = True
                 response =b'+OK\r\n'
@@ -737,17 +764,78 @@ async def client_handler(reader,writer):
 
 
 
-async def run_server():
+async def run_server(port_number):
     try:
-        redis_server=await asyncio.start_server(client_handler,host="localhost",port=6379)
+        redis_server=await asyncio.start_server(client_handler,host="localhost",port=port_number)
         print(f'Redis server listening {redis_server.sockets[0].getsockname()}')
+        RedisAsyncServer.port =port_number
+        if RedisAsyncServer.role=='slave':
+            try:
+                m_reader,m_writer=await asyncio.open_connection(RedisAsyncServer.master_host,RedisAsyncServer.master_port)
+                print(f"Connected to master {RedisAsyncServer.master_host}:{RedisAsyncServer.master_port}")
+                #sending PING
+                m_writer.write(b'*1\r\n$4\r\nPING\r\n')
+                await m_writer.drain()
+                data = await m_reader.readline()
+                print("MASTER says:", data.decode())
+
+                #sending REPLCONF listening-port <PORT>
+                response=f'*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$4\r\n{RedisAsyncServer.port}\r\n'
+                m_writer.write(response.encode())
+                await m_writer.drain()
+                data = await m_reader.readline()
+                print("MASTER says:", data.decode())
+
+                # REPLCONF capa psync2
+                m_writer.write(b'*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n')
+                await m_writer.drain()
+                data = await m_reader.readline()
+                if  'OK' in data.decode():
+                    # sending PSYNC to master
+                    response=f'*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n'
+                    m_writer.write(response.encode())
+                    await m_writer.drain()
+                    data = await m_reader.readline()
+                    
+            except Exception as e:
+                print("Client handling failed : Error ->",str(e))
+            finally:
+                m_writer.close()
+                await m_writer.wait_closed()
+
         asyncio.create_task(blocked_client_handler())                    
         await redis_server.serve_forever()
     except Exception as e:
         print("Server execution failed : Error ->",str(e))
 
+import sys
 def main():
-    print("Execution starts here....!")
+    master_details=''
+    port_number=6379
+    if '--port' in sys.argv:
+        try:
+            args=sys.argv
+            port_number=int(args[args.index('--port')+1])
+        except:
+            port_number=6379
+    else:
+        port_number=6379
+    if '--replicaof' in sys.argv:
+        try:
+            RedisAsyncServer.role='slave'
+            args=sys.argv
+            master_details=args[args.index('--replicaof')+1].split(' ')
+            master_host = master_details[0].strip()
+            master_port = int(master_details[1].strip())
+            RedisAsyncServer.master_host=master_host
+            RedisAsyncServer.master_port=master_port
+            
+        except:
+            pass
+    if RedisAsyncServer.role=='master':
+        RedisAsyncServer.master_replid = '8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb'
+        RedisAsyncServer.master_repl_offset = 0
+    print("Execution starts here....!role=",RedisAsyncServer.role, master_details)
 
     # server_socket = socket.create_server(("localhost", 6379), reuse_port=True)
     # conn, _ =server_socket.accept() # wait for client        
@@ -755,7 +843,7 @@ def main():
     #     data = conn.recv(1024)
     #     conn.sendall(b"+PONG\r\n")
 
-    asyncio.run(run_server())
+    asyncio.run(run_server(port_number))
     
 
 
