@@ -3,7 +3,9 @@ from datetime import timezone,timedelta,datetime
 import time
 import threading
 from collections import deque,defaultdict
-
+import os
+import json
+import shutil
 class RedisServer():
     def __init__(self,role='master',port=6379):
         self.port= port
@@ -22,13 +24,92 @@ class Replica():
 
 class Master():
     def __init__(self):
-        rdb_filename=None
-        rdb_dir=None
+        self.rdb_filename=None
+        self.rdb_dir=None
         self.master_replid = ''
         self.master_repl_offset=None
+        
         # dict of Lists,key is slave-writer,value is list(replica's offset,sync)
         # sync is true means replica's offset and  replica server's replica_command_offset are same
         self.ReplicaList={}
+    def get_type(self,value):
+        if value == 0:
+            return 'string'
+        if value == 1:
+            return 'list'
+        if value == 2:
+            return 'set'
+        return 'string'
+    def save(self):
+        try:
+            os.makedirs(self.rdb_dir, exist_ok=True)
+            filepath=os.path.join(self.rdb_dir,self.rdb_filename)
+            basedir="C:\\Users\\Ardra\\codecrafters-redis-python"
+            os.makedirs(basedir, exist_ok=True)  
+            tempfilepath=os.path.join(basedir,self.rdb_filename)  
+               
+            with open(tempfilepath,'wb') as dst,open(filepath,'rb') as src:
+                shutil.copyfileobj(src, dst) 
+            # b'REDIS0011\xfa\tredis-ver\x057.2.0\xfa\nredis-bits\xc0@\xfe\x00\xfb\x01\x00\x00\x05mango\x06orange\xff\xeb)\xe1\xcfp\x08\x1f\x9a'
+
+            with open(tempfilepath,'rb') as rdbfile: 
+                chunk = rdbfile.read(5)  
+                if chunk == b'REDIS' :
+                    print("Reading rdb file, REDIS found !!")            
+                while data := rdbfile.read(1):
+                    if data == b'\xff':
+                        break
+                    if data == b'\xfd':
+                        #Expire timestamp in seconds (4-byte unsigned integer)
+                        expires_on_sec=float(rdbfile.read(4).decode())
+                        value_type= rdbfile.read(1)[0]
+                        type = self.get_type(value_type)
+                        key_len=rdbfile.read(1)[0]
+                        key=rdbfile.read(key_len).decode()
+                        val_len=rdbfile.read(1)[0]
+                        val=rdbfile.read(val_len).decode()
+                        
+                    elif data == b'\xfc' :
+                        #Expire timestamp in milliseconds (8-byte unsigned long)
+                        expires_on_sec=float(rdbfile.read(8).decode())
+                        value_type= rdbfile.read(1)[0]
+                        type = self.get_type(value_type)
+                        key_len=rdbfile.read(1)[0]
+                        key=rdbfile.read(key_len).decode()
+                        val_len=rdbfile.read(1)[0]
+                        val=rdbfile.read(val_len).decode()
+                    elif data == b'\x00' :
+                        # data without expiry
+                        value_type= rdbfile.read(1)[0]
+                        type = self.get_type(value_type)
+                        key_len=rdbfile.read(1)[0]
+                        key=rdbfile.read(key_len).decode()
+                        val_len=rdbfile.read(1)[0]
+                        val=rdbfile.read(val_len).decode()                      
+
+                        
+
+                # val = rdbfile.read(5) 
+                # while val:
+                #     print("----->",val) 
+                #     val=rdbfile.read(1) 
+                #     if not val:
+                #         break
+
+                # if line1 == '52 45 44 49 53' :
+                #     eof=False
+                #     while not eof:
+                #         val = rdbfile.read(1)
+
+                #         if val == 'FE' or val == '0xFE':
+                #             newdb=True
+                #             break
+                #     if newdb:
+
+
+                         
+        except Exception as e:
+            print("Exception during rdb file save :: ",e)    
 
     
 
@@ -419,7 +500,7 @@ async def command_handler(writer,client_addr,server_role,query_string,input_toke
                     response=f'*2\r\n$3\r\ndir\r\n${len(rdb_dir)}\r\n{rdb_dir}\r\n'
                 elif data_list[2].lower() == 'dbfilename':
                     rdb_filename=RedisAsyncServer.server.rdb_filename
-                    response=f'*2\r\n$10\r\dbfilename\r\n${len(rdb_filename)}\r\n{rdb_filename}\r\n'
+                    response=f'*2\r\n$10\r\ndbfilename\r\n${len(rdb_filename)}\r\n{rdb_filename}\r\n'
 
         elif data_list[0] == 'SET':
             print("Inside SET , query_string",query_string)
@@ -803,6 +884,7 @@ async def client_handler(reader,writer):
         
         print("Connected...",client_addr,RedisAsyncServer.role) 
         CONNECT = True
+        
         # multi command enabled, queue to hold upcoming commands
         MULTI=[False,deque()]
         while CONNECT:
@@ -811,6 +893,15 @@ async def client_handler(reader,writer):
                 await asyncio.sleep(0.2)
                 continue
             query_string=str(input_query.decode()) 
+            print(">>>>>>>query_string : ",query_string)
+            if query_string == '*2\r\n$4\r\nKEYS\r\n$3\r\n"*"\r\n':
+                if RedisAsyncServer.data_store:
+                    response=f'*{len(RedisAsyncServer.data_store)}\r\n'
+                    for key in RedisAsyncServer.data_store.keys():
+                        response=response+f'${len(key)}\r\n{key}\r\n'
+                writer.write(response.encode())
+                await writer.drain() 
+                continue 
             # print('RECEIVED = ',query_string)
             input_tokens=query_string.splitlines()
             if 'info' in input_tokens or 'INFO' in input_tokens:
@@ -940,9 +1031,9 @@ async def client_handler(reader,writer):
                 new_cmd_str='\r\n'.join(input_tokens)+'\r\n'
                 if RedisAsyncServer.role == 'master' :
                     CommandDeque.append(new_cmd_str)
-                    print("added to CommandDeque=",CommandDeque)
                     await propagate_command()
                     query_string=''
+                    await RedisAsyncServer.server.save()                    
             if not response == 'REPLCONF ACK':
                 print("response from client handler")
                 print("for command :",input_tokens)
@@ -1165,6 +1256,9 @@ def main():
     if RedisAsyncServer.role=='master':
         RedisAsyncServer.server.master_replid = '8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb'
         RedisAsyncServer.server.master_repl_offset = 0
+        if RedisAsyncServer.server.rdb_dir and RedisAsyncServer.server.rdb_filename:
+            RedisAsyncServer.server.save()
+            
     print("Execution starts here....!role=",RedisAsyncServer.role, master_details)
 
     # server_socket = socket.create_server(("localhost", 6379), reuse_port=True)
