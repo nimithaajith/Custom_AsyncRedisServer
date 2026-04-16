@@ -40,76 +40,77 @@ class Master():
         if value == 2:
             return 'set'
         return 'string'
-    def save(self):
-        try:
-            os.makedirs(self.rdb_dir, exist_ok=True)
-            filepath=os.path.join(self.rdb_dir,self.rdb_filename)
-            basedir="C:\\Users\\Ardra\\codecrafters-redis-python"
-            os.makedirs(basedir, exist_ok=True)  
-            tempfilepath=os.path.join(basedir,self.rdb_filename)  
-               
-            with open(tempfilepath,'wb') as dst,open(filepath,'rb') as src:
-                shutil.copyfileobj(src, dst) 
-            # b'REDIS0011\xfa\tredis-ver\x057.2.0\xfa\nredis-bits\xc0@\xfe\x00\xfb\x01\x00\x00\x05mango\x06orange\xff\xeb)\xe1\xcfp\x08\x1f\x9a'
+def initialize_data_store():
+    try:
+        rdb_dir=RedisAsyncServer.server.rdb_dir
+        rdb_filename=RedisAsyncServer.server.rdb_filename
+        os.makedirs(rdb_dir, exist_ok=True)
+        filepath=os.path.join(rdb_dir,rdb_filename)
+        basedir="C:\\Users\\Ardra\\codecrafters-redis-python"
+        os.makedirs(basedir, exist_ok=True)  
+        tempfilepath=os.path.join(basedir,rdb_filename)  
+            
+        with open(tempfilepath,'wb') as dst,open(filepath,'rb') as src:
+            shutil.copyfileobj(src, dst) 
+        # b'REDIS0011\xfa\tredis-ver\x057.2.0\xfa\nredis-bits\xc0@\xfe\x00\xfb\x01\x00\x00\x05mango\x06orange\xff\xeb)\xe1\xcfp\x08\x1f\x9a'
 
-            with open(tempfilepath,'rb') as rdbfile: 
-                chunk = rdbfile.read(5)  
-                if chunk == b'REDIS' :
-                    print("Reading rdb file, REDIS found !!")            
-                while data := rdbfile.read(1):
-                    if data == b'\xff':
-                        break
-                    if data == b'\xfd':
-                        #Expire timestamp in seconds (4-byte unsigned integer)
-                        expires_on_sec=float(rdbfile.read(4).decode())
-                        value_type= rdbfile.read(1)[0]
-                        type = self.get_type(value_type)
-                        key_len=rdbfile.read(1)[0]
-                        key=rdbfile.read(key_len).decode()
-                        val_len=rdbfile.read(1)[0]
-                        val=rdbfile.read(val_len).decode()
-                        
-                    elif data == b'\xfc' :
-                        #Expire timestamp in milliseconds (8-byte unsigned long)
-                        expires_on_sec=float(rdbfile.read(8).decode())
-                        value_type= rdbfile.read(1)[0]
-                        type = self.get_type(value_type)
-                        key_len=rdbfile.read(1)[0]
-                        key=rdbfile.read(key_len).decode()
-                        val_len=rdbfile.read(1)[0]
-                        val=rdbfile.read(val_len).decode()
-                    elif data == b'\x00' :
-                        # data without expiry
-                        value_type= rdbfile.read(1)[0]
-                        type = self.get_type(value_type)
-                        key_len=rdbfile.read(1)[0]
-                        key=rdbfile.read(key_len).decode()
-                        val_len=rdbfile.read(1)[0]
-                        val=rdbfile.read(val_len).decode()                      
+        with open(tempfilepath,'rb') as rdbfile: 
+            chunk = rdbfile.read(5)  
+            if chunk == b'REDIS' :
+                print("Reading rdb file, REDIS found !!")  
+            while i := rdbfile.read(1):
+                if i==b'\xfe':
+                    i=rdbfile.read(1)
+                    break
 
-                        
-
-                # val = rdbfile.read(5) 
-                # while val:
-                #     print("----->",val) 
-                #     val=rdbfile.read(1) 
-                #     if not val:
-                #         break
-
-                # if line1 == '52 45 44 49 53' :
-                #     eof=False
-                #     while not eof:
-                #         val = rdbfile.read(1)
-
-                #         if val == 'FE' or val == '0xFE':
-                #             newdb=True
-                #             break
-                #     if newdb:
-
-
-                         
-        except Exception as e:
-            print("Exception during rdb file save :: ",e)    
+            while data := rdbfile.read(1):
+                create=False
+                if data == b'\xff':
+                    break
+                if data == b'\xfd':
+                    #Expire timestamp in seconds (4-byte unsigned integer)
+                    expires_on_sec = int.from_bytes(rdbfile.read(4), byteorder='little', signed=False)
+                    expiry = datetime.now(timezone.utc) + timedelta(seconds=expires_on_sec)                
+                    value_type= rdbfile.read(1)[0]
+                    type = RedisAsyncServer.server.get_type(value_type)
+                    key_len=rdbfile.read(1)[0]
+                    key=rdbfile.read(key_len).decode()
+                    val_len=rdbfile.read(1)[0]
+                    val=rdbfile.read(val_len).decode()
+                    create=True
+                    
+                elif data == b'\xfc' :
+                    #Expire timestamp in milliseconds (8-byte unsigned long)
+                    expires_on_sec = int.from_bytes(rdbfile.read(8), byteorder='little', signed=False)
+                    expiry = datetime.now(timezone.utc) + timedelta(milliseconds=expires_on_sec)
+                    value_type= rdbfile.read(1)[0]
+                    type = RedisAsyncServer.server.get_type(value_type)
+                    key_len=rdbfile.read(1)[0]
+                    key=rdbfile.read(key_len).decode()
+                    val_len=rdbfile.read(1)[0]
+                    val=rdbfile.read(val_len).decode()
+                    create=True
+                elif data == b'\x00' :
+                    # data without expiry
+                    expiry=None
+                    bytetype=rdbfile.read(1)
+                    print("type=",bytetype[0])
+                    bytekeylen=rdbfile.read(1)
+                    value_type= bytetype[0]
+                    type = RedisAsyncServer.server.get_type(value_type)
+                    key_len=bytekeylen[0]
+                    bytekey=rdbfile.read(key_len)
+                    key=bytekey.decode()
+                    val_len=rdbfile.read(1)[0]
+                    val=rdbfile.read(val_len).decode() 
+                                         
+                    create=True              
+                if create:
+                    print(f"saving >>>>{key}={val} of type {type} expire@{expiry}")
+                    RedisAsyncServer.data_store[key] = RedisObject(data = val,exp=expiry,data_type=type)  
+                                       
+    except Exception as e:
+        print("Exception during rdb file save :: ",e)    
 
     
 
@@ -493,6 +494,23 @@ async def command_handler(writer,client_addr,server_role,query_string,input_toke
             # await writer.drain() 
             # print('###RESPONSE###')
             # print(response)
+        elif data_list[0] == 'KEYS': 
+            if data_list[1] == '*':
+                all_keys=RedisAsyncServer.data_store.keys()
+                response=f'*{len(all_keys)}\r\n'    
+                for k in all_keys:
+                    response=response+f'${len(k)}\r\n{k}\r\n'
+            else:
+                pattern=data_list[1]
+                k_count=0
+                response=''
+                import fnmatch
+                for k in all_keys:
+                    if fnmatch.fnmatch(k, pattern):
+                        response=response+f'${len(k)}\r\n{k}\r\n'
+                        k_count+=1
+                response=f'*{k_count}\r\n'+response
+
         elif data_list[0] == 'CONFIG':
             if data_list[1] == 'GET':
                 if data_list[2].lower() == 'dir':
@@ -1033,7 +1051,7 @@ async def client_handler(reader,writer):
                     CommandDeque.append(new_cmd_str)
                     await propagate_command()
                     query_string=''
-                    await RedisAsyncServer.server.save()                    
+                    # await RedisAsyncServer.server.save()                    
             if not response == 'REPLCONF ACK':
                 print("response from client handler")
                 print("for command :",input_tokens)
@@ -1257,7 +1275,7 @@ def main():
         RedisAsyncServer.server.master_replid = '8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb'
         RedisAsyncServer.server.master_repl_offset = 0
         if RedisAsyncServer.server.rdb_dir and RedisAsyncServer.server.rdb_filename:
-            RedisAsyncServer.server.save()
+            initialize_data_store()
             
     print("Execution starts here....!role=",RedisAsyncServer.role, master_details)
 
