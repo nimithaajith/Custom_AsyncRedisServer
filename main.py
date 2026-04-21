@@ -153,6 +153,7 @@ def initialize_data_store():
     
 
 RedisAsyncServer=RedisServer()
+channel_subscriptions={}
 
 CommandDeque=deque()
 class RedisObject():
@@ -532,6 +533,20 @@ async def command_handler(writer,client_addr,server_role,query_string,input_toke
             # await writer.drain() 
             # print('###RESPONSE###')
             # print(response)
+        elif data_list[0].lower() == 'subscribe':
+            if client_addr not in channel_subscriptions:
+                channel_subscriptions[client_addr] = set()
+            channel_subscriptions[client_addr].add(data_list[1])
+            channels=len(channel_subscriptions[client_addr])
+            response=f'*3\r\n$9\r\nsubscribe\r\n${len(data_list[1])}\r\n{data_list[1]}\r\n:{channels}\r\n'
+        elif data_list[0].lower() == 'publish':
+            subscribers=0
+            if channel_subscriptions:
+                for channels in channel_subscriptions.values():
+                    if data_list[1] in channels:
+                        subscribers += 1
+            response=f':{subscribers}\r\n'
+
         elif data_list[0] == 'KEYS': 
             if data_list[1] == '*':
                 all_keys=RedisAsyncServer.data_store.keys()
@@ -960,6 +975,20 @@ async def client_handler(reader,writer):
                 continue 
             # print('RECEIVED = ',query_string)
             input_tokens=query_string.splitlines()
+            if client_addr in channel_subscriptions :
+                if len(channel_subscriptions[client_addr])>0 :
+                    allowed_cmds=['SUBSCRIBE','UNSUBSCRIBE','PSUBSCRIBE','PUNSUBSCRIBE','PING','QUIT']            
+                    if input_tokens[2].upper() not in allowed_cmds:
+                        response=f"-ERR Can't execute '{input_tokens[2]}' in subscribed mode\r\n"
+                        writer.write(response.encode())
+                        await writer.drain() 
+                        continue  
+                    elif input_tokens[2].upper()=='PING':
+                        response=b'*2\r\n$4\r\npong\r\n$0\r\n\r\n' 
+                        writer.write(response)
+                        await writer.drain() 
+                        continue                       
+            
             if 'info' in input_tokens or 'INFO' in input_tokens:
                 if 'replication' in input_tokens:
                     role=RedisAsyncServer.role
