@@ -946,13 +946,64 @@ async def command_handler(writer,client_addr,server_role,query_string,input_toke
                         response=f'*1\r\n'+block_response
                     else:
                         response=block_response               
-
-                                
+                   
             print(">>>>RESPONSE<<<<<")
             print(response)
             # writer.write(response.encode()) 
             # await writer.drain() 
+        elif data_list[0].lower() == 'zadd':
+            # ZADD racer_scores 8.0 "Sam"
+            print('data_list =', data_list)
+            key=data_list[1]
+            score=float(data_list[2])
+            member = data_list[3]
+            response=None
+            score_list=list((score,member))            
+            if key not in RedisAsyncServer.data_store:
+                new_redis_object = RedisObject(data=[],data_type='sortedset')
+                updated_data=[]
+                updated_data.append(score_list)                
+                RedisAsyncServer.data_store[key] = new_redis_object
+                
+            else:
+                memberExists = False
+                old_data = RedisAsyncServer.data_store[key].data
+                for l in old_data:
+                    if l[1] == member :
+                        updated_data = old_data 
+                        updated_data.remove(l)
+                        updated_data.append(score_list)                        
+                        response=':0\r\n' 
+                        memberExists = True                      
+                        break
+                if not memberExists:
+                    updated_data=RedisAsyncServer.data_store[key].data 
+                    updated_data.append(score_list)
 
+            
+            new_sorted_data  = sorted(updated_data,key=lambda x : (x[0],x[1])) 
+            print("new data = ",new_sorted_data)
+            RedisAsyncServer.data_store[key].data =new_sorted_data  
+            if response is None:
+                response=':1\r\n' 
+        elif data_list[0].lower() == 'zrank':
+            # ZRANK zset_key member
+            print('data_list =', data_list)
+            key=data_list[1]
+            member = data_list[2] 
+            if key not in RedisAsyncServer.data_store :
+                response = '$-1\r\n' 
+            else:
+                memberExists = False
+                old_data = RedisAsyncServer.data_store[key].data
+                for l in old_data:
+                    if l[1] == member :
+                        index=old_data.index(l)                                             
+                        response=f':{index}\r\n' 
+                        memberExists = True                      
+                        break
+                if not memberExists:
+                    response = '$-1\r\n' 
         elif data_list[0] == 'TYPE': 
             key=data_list[1]
             if key in RedisAsyncServer.data_store.keys() :
