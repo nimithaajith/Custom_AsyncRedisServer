@@ -1003,7 +1003,97 @@ async def command_handler(writer,client_addr,server_role,query_string,input_toke
                         memberExists = True                      
                         break
                 if not memberExists:
-                    response = '$-1\r\n' 
+                    response = '$-1\r\n'
+        elif data_list[0].lower() == 'zrange' :
+            # ZRANGE racer_scores 0 2
+            key=data_list[1]
+            start_inx=int(data_list[2])
+            end_inx=int(data_list[3])
+            print(f"zrange[{key}] : [{start_inx} : {end_inx}]")
+            slice = True
+            if key not in RedisAsyncServer.data_store :
+                response = '*0\r\n' 
+                slice = False
+            else:
+                scores=RedisAsyncServer.data_store[key].data
+                total_len=len(scores)
+                # If the start index is greater than or equal to the cardinality of the sorted set, an empty array is returned.
+                #If the start index is greater than the stop index, the result is an empty array
+                if start_inx >= total_len :
+                    response = '*0\r\n' 
+                    slice = False
+                if  end_inx >= 0 and start_inx > end_inx :
+                    response = '*0\r\n' 
+                    slice = False
+                if slice:
+                    # If the stop index is greater than the cardinality of the sorted set, the stop index is treated as the last element.
+                    if end_inx > total_len :
+                        end_inx = total_len-1
+                    if end_inx < 0:
+                        if abs(end_inx) >= total_len :
+                            end_inx = 0
+                        else:
+                            end_inx = total_len + end_inx
+                    if start_inx < 0:
+                        if abs(start_inx) >= total_len :
+                            start_inx = 0
+                        else: 
+                            start_inx = start_inx +total_len
+                    
+                    print("zrange slicing = ",start_inx,end_inx+1)
+                    sliced_set= scores[start_inx : end_inx+1]
+                    print("zrange sliced_set = ",sliced_set)
+                    response=f'*{len(sliced_set)}\r\n'
+                    response=response+''.join(f'${len(l[1])}\r\n{l[1]}\r\n' for l in sliced_set)
+            print("zrange response = ",response)
+        elif data_list[0].lower() == 'zcard' :
+            # ZCARD zset_key
+            key = data_list[1]
+            
+            if key not in RedisAsyncServer.data_store :
+                response = ":0\r\n" 
+                
+            else:
+                scores=RedisAsyncServer.data_store[key].data
+                total_len=len(scores)
+                response = f":{total_len}\r\n" 
+        elif data_list[0].lower() == 'zscore' :
+            # ZSCORE zset_key member
+            key = data_list[1]
+            member=data_list[2]
+            if key not in RedisAsyncServer.data_store :
+                response = "$-1\r\n" 
+            else:
+                is_member = False
+                old_data = RedisAsyncServer.data_store[key].data
+                for l in old_data:
+                    if l[1] == member : 
+                        scr_str=str(l[0])                                                                    
+                        response=f'${len(scr_str)}\r\n{scr_str}\r\n' 
+                        is_member = True                      
+                        break
+                if not is_member:
+                    response = '$-1\r\n'
+            print("zscore response = ",response)
+        elif data_list[0].lower() == 'zrem' :
+            # ZREM zset_key member
+            key = data_list[1]
+            member=data_list[2]
+            if key not in RedisAsyncServer.data_store :
+                response = ":0\r\n" 
+            else:
+                is_member = False
+                old_data = RedisAsyncServer.data_store[key].data
+                for l in old_data:
+                    if l[1] == member : 
+                        old_data.remove(l) 
+                        RedisAsyncServer.data_store[key].data =old_data                                                                  
+                        response=':1\r\n' 
+                        is_member = True                      
+                        break
+                if not is_member:
+                    response = ':0\r\n'
+            
         elif data_list[0] == 'TYPE': 
             key=data_list[1]
             if key in RedisAsyncServer.data_store.keys() :
