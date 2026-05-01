@@ -7,6 +7,7 @@ import os
 import json
 import shutil
 from . import geo_encode
+from . import distance
 class RedisServer():
     def __init__(self,role='master',port=6379):
         self.port= port
@@ -1160,8 +1161,37 @@ async def command_handler(writer,client_addr,server_role,query_string,input_toke
             else:
                 response=response + ''.join('*-1\r\n' for _ in range(m_len))           
 
+        elif data_list[0].upper() == 'GEODIST' :
+            # GEODIST places Munich Paris  , 
+            
+            key=data_list[1]
+            locations=data_list[2:]            
+            if key in RedisAsyncServer.data_store :                
+                geopos=RedisAsyncServer.data_store[key].data 
+                latitude1 = None
+                longitude1= None
+                latitude2= None
+                longitude2 = None
+                for score,location in geopos:
+                    if location in locations:
+                        if locations[0] == locations[1]:
+                            response=f'$1\r\n0\r\n'
+                            break
+                        if location == locations[0]:
+                            latitude1,longitude1=geo_decode.decode(int(score))
+                        elif location == locations[1]:
+                            latitude2,longitude2=geo_decode.decode(int(score))
+                    
+                    if  latitude1 and longitude1 and latitude2 and longitude2 :
+                        print(latitude1, longitude1,' :::: ',latitude2,longitude2)
+                        dist=  distance.haversine(latitude1, longitude1, latitude2, longitude2)  
+                        response=f'${len(str(dist))}\r\n{str(dist)}\r\n'
+                        break
 
-
+                
+                
+            else:
+                response = '$-1\r\n'
         elif data_list[0] == 'TYPE': 
             key=data_list[1]
             if key in RedisAsyncServer.data_store.keys() :
