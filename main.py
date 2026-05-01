@@ -6,6 +6,7 @@ from collections import deque,defaultdict
 import os
 import json
 import shutil
+from . import geo_encode
 class RedisServer():
     def __init__(self,role='master',port=6379):
         self.port= port
@@ -501,7 +502,7 @@ async def get_ack_replicas(no_of_awaited_replicas,timeout,waittime):
                     
      
     
-
+from . import geo_decode
 async def command_handler(writer,client_addr,server_role,query_string,input_tokens):
     input_tokens=query_string.splitlines()
     print('>>>>inside command_handler<<<<<')
@@ -1107,8 +1108,8 @@ async def command_handler(writer,client_addr,server_role,query_string,input_toke
                 #     RedisAsyncServer.data_store[key] = RedisObject(data=[],data_type='geospatial')
                 # RedisAsyncServer.data_store[key].data.append((longitude,latitude,placename))  
                 # response = ':1\r\n'  
-                
-                score_list=list((0,placename))            
+                geoscore= geo_encode.encode(latitude=latitude,longitude=longitude)
+                score_list=list((geoscore,placename))            
                 if key not in RedisAsyncServer.data_store:
                     new_redis_object = RedisObject(data=[],data_type='sortedset')
                     updated_data=[]
@@ -1135,6 +1136,30 @@ async def command_handler(writer,client_addr,server_role,query_string,input_toke
                 RedisAsyncServer.data_store[key].data =new_sorted_data  
                 if response is None:
                     response=':1\r\n' 
+
+        elif data_list[0].upper() == 'GEOPOS' :
+            # GEOPOS key member1 member2
+            key=data_list[1]
+            members=data_list[2:]
+            m_len=len(members)
+            response=f'*{m_len}\r\n'
+            if key in RedisAsyncServer.data_store :                
+                geopos=RedisAsyncServer.data_store[key].data                
+                for query_member in members:
+                    is_member=False
+                    for score,member in geopos:
+                        if member == query_member:
+                            latitude,longitude=geo_decode.decode(int(score))
+                            la=str(latitude)
+                            lo=str(longitude)
+                            response=response + f'*2\r\n${len(lo)}\r\n{lo}\r\n${len(la)}\r\n{la}\r\n'
+                            is_member=True
+                            break
+                    if not is_member:
+                        response=response + '*-1\r\n'
+            else:
+                response=response + ''.join('*-1\r\n' for _ in range(m_len))           
+
 
 
         elif data_list[0] == 'TYPE': 
