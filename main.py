@@ -8,6 +8,13 @@ import json
 import shutil
 from . import geo_encode
 from . import distance
+from . import hashing
+class User():
+    def __init__(self):
+        self.username='default'
+        self.flags=['nopass']
+        self.password=''
+user=User()
 class RedisServer():
     def __init__(self,role='master',port=6379):
         self.port= port
@@ -17,6 +24,7 @@ class RedisServer():
         self.master_port=None
         self.data_store={}
         self.server=Master()
+        self.users=[user]
 
 class Replica():
     def __init__(self):
@@ -47,6 +55,13 @@ class Master():
         if value == 2:
             return 'set'
         return 'string'
+    
+class User():
+    def __init__(self):
+        self.username='default'
+        self.flags=['nopass']
+        self.password=''
+user = User()
 def initialize_data_store():
     try:
         rdb_dir=RedisAsyncServer.server.rdb_dir
@@ -1258,6 +1273,46 @@ async def command_handler(writer,client_addr,server_role,query_string,input_toke
             else:
                 response=f'*0\r\n'
             print("response = ",response)
+
+        elif data_list[0].upper() == 'ACL':
+            if data_list[1].upper() == 'WHOAMI':
+                response = '$7\r\ndefault\r\n'
+            elif data_list[1].upper() == 'GETUSER':
+                user_name=data_list[2]
+                user=RedisAsyncServer.users[0]
+                flags=user.flags
+                if 'nopass' in flags:
+                    response = '*4\r\n$5\r\nflags\r\n*1\r\n$6\r\nnopass\r\n$9\r\npasswords\r\n*0\r\n'
+                else:
+                    password=user.password
+                    response = f'*4\r\n$5\r\nflags\r\n*0\r\n$9\r\npasswords\r\n*1\r\n${len(password)}\r\n{password}\r\n'
+            elif data_list[1].upper() == 'SETUSER':
+                # ACL SETUSER default >mypassword
+                user_name=data_list[2]
+                if data_list[3].startswith('>'):
+                    raw_password=str(data_list[3]).lstrip('>')
+                    current_users=RedisAsyncServer.users
+                    for user in current_users:
+                        if user.username == user_name:
+                            RedisAsyncServer.users.remove(user)
+                            user.password = hashing.hash_password(raw_password)
+                            flags=user.flags
+                            if 'nopass' in flags:
+                                user.flags.remove('nopass') 
+                            RedisAsyncServer.users.append(user) 
+                            break   
+                response='+OK\r\n'
+        elif data_list[0].upper() == 'AUTH':
+            #AUTH <username> <password>
+            user_name=data_list[1]
+            user_pass=data_list[2]
+            response='-WRONGPASS invalid username-password pair or user is disabled.\r\n'
+            for user in RedisAsyncServer.users:
+                if user.username == user_name:
+                    if user.password == hashing.hash_password(str(user_pass)):
+                        response='+OK\r\n'
+                        break                    
+
         elif data_list[0] == 'TYPE': 
             key=data_list[1]
             if key in RedisAsyncServer.data_store.keys() :
@@ -1609,6 +1664,57 @@ async def command_propagation_handler():
         m_writer.close()
         await m_writer.wait_closed()
 
+def aof_replay_file(aof_path,line) :
+    m_commands=None
+    aof_file_name=line.split()[1]    
+    aof_file=os.path.join(aof_path,aof_file_name)
+    with open(aof_file,'r') as af:
+        m_commands=af.read()
+    if m_commands :    
+        # for m_command in m_commands:
+        print(">>>AOF command = ",m_commands)
+        input_tokens=m_commands.splitlines()
+        i=0
+        loop=True
+        commands=deque()
+        while i<len(input_tokens):
+            tokens=[]
+            if input_tokens[i].startswith('*') and len(input_tokens[i]) >1:
+                no_of_elements=int(input_tokens[i].lstrip('*')) 
+                count=no_of_elements*2
+                tokens.append(input_tokens[i])
+                for _ in range(count):
+                    i=i+1
+                    tokens.append(input_tokens[i])
+                print(">>>AOF command found = ",tokens)
+                commands.append(tokens)                
+            i=i+1
+
+        if commands:
+            for tokens in commands:           
+                data_list=[]            
+                for token in tokens:
+                    if len(token)>1 and token.startswith('*'):                
+                        continue
+                    if token.startswith('$') and token.strip() != '$':
+                        continue
+                    data_list.append(token.strip())
+                if data_list:
+                    if data_list[0].upper() == 'SET':
+                        key=data_list[1]
+                        val=data_list[2]
+                        data_type = 'string'
+                        expiry =None
+                        if len(data_list) > 3:
+                            if data_list[3] == 'PX':
+                                expiry = datetime.now(timezone.utc) + timedelta(milliseconds=int(data_list[4]))
+                            elif data_list[3] == 'EX' :
+                                expiry = datetime.now(timezone.utc) + timedelta(seconds=int(data_list[4]))                        
+                        RedisAsyncServer.data_store[key] = RedisObject(data = val,exp=expiry,data_type=data_type)
+        else:
+            print("NO Commands to replay in AOF")
+
+
                                         
                         
            
@@ -1679,18 +1785,40 @@ def main():
             new_aof_file=RedisAsyncServer.server.appendfilename+'.1.incr.aof' 
             manifest_file=RedisAsyncServer.server.appendfilename+'.manifest'
             aof_filepath=os.path.join(aof_dir,new_aof_file)
-            with open(aof_filepath,'w') as f:
-                print(f'AOF file created by master......')
+            with open(aof_filepath,'a') as f:
+                print(f'AOF file check by master......')
             manifest_file_path=os.path.join(aof_dir,manifest_file)
-            with open(manifest_file_path,'w') as mf:
+            with open(manifest_file_path,'a') as mf:
+                print(f'manifest file check by master')
                 data_str=f'file {new_aof_file} seq 1 type i'
-                print("Manifest file created and data written = ",mf.write(data_str))
+                mf.write(data_str)
+                
+                # data_str=f'file {new_aof_file} seq 1 type i'
+                # print("Manifest file created and data written = ",mf.write(data_str))
             
         RedisAsyncServer.server.master_replid = '8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb'
         RedisAsyncServer.server.master_repl_offset = 0
         if RedisAsyncServer.server.rdb_dir and RedisAsyncServer.server.rdb_filename:
             initialize_data_store()
-            
+    if RedisAsyncServer.role == 'master':
+        if RedisAsyncServer.server.appendonly == 'yes':
+            print(">>>>>>>>AOF FILE REPLAY<<<<<<<<")
+            aof_path=os.path.join(RedisAsyncServer.server.dir,RedisAsyncServer.server.appenddirname)
+            print('aof_path =',aof_path)
+            if os.path.exists(aof_path) :
+                manifest_file=os.path.join(aof_path,RedisAsyncServer.server.appendfilename+'.manifest')
+                print("manifest_file = ",manifest_file)
+                if os.path.exists(manifest_file):
+                    print("Opening manifest file")
+                    with open(manifest_file,'r') as mf:
+                        contents=mf.readlines()  
+                        print("Contents of manifest file ::",contents)
+                        for line in contents:
+                            print("line in aof file =",line)
+                            if 'type i' in line:
+                                print("Calling aof reply......")
+                                aof_replay_file(aof_path,line) 
+                                break
     print("Execution starts here....!role=",RedisAsyncServer.role, master_details)
 
     # server_socket = socket.create_server(("localhost", 6379), reuse_port=True)
