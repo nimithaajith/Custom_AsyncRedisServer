@@ -625,6 +625,23 @@ async def command_handler(writer,client_addr,server_role,query_string,input_toke
                 
             RedisAsyncServer.data_store[key] = RedisObject(data = val,exp=expiry,data_type=data_type) 
             print(f'{server_role} set the new value !!!!')
+            if server_role == 'master' :
+                if RedisAsyncServer.server.appendfsync == 'always':
+                    aof_dir=os.path.join(RedisAsyncServer.server.dir,RedisAsyncServer.server.appenddirname)                    
+                    manifest_file=RedisAsyncServer.server.appendfilename+'.manifest'        
+                    manifest_file_path=os.path.join(aof_dir,manifest_file)
+                    data_str=None
+                    with open(manifest_file_path,'r') as mf:
+                        data_str= mf.readline()
+                        print("manifest file read =",data_str)
+                    if data_str is not None:
+                        aof_file_name=data_str.split()[1]
+                        aof_file_path=os.path.join(aof_dir,aof_file_name)
+                        with open(aof_file_path,'a') as af:
+                            data_cmd=f'{query_string}'
+                            af.write(data_cmd)    
+                            print("Added SET to aoffile = ",data_cmd)        
+                    
             response=f"+OK\r\n" 
             
             # writer.write(response.encode())
@@ -1659,9 +1676,16 @@ def main():
         if RedisAsyncServer.server.appendonly == 'yes' :
             aof_dir=os.path.join(RedisAsyncServer.server.dir,RedisAsyncServer.server.appenddirname)
             os.makedirs(aof_dir, exist_ok=True)
-            aof_filepath=os.path.join(aof_dir,RedisAsyncServer.server.appendfilename)
-            print('aof_dir =', aof_dir)
-            print('aof_filepath =', aof_filepath)
+            new_aof_file=RedisAsyncServer.server.appendfilename+'.1.incr.aof' 
+            manifest_file=RedisAsyncServer.server.appendfilename+'.manifest'
+            aof_filepath=os.path.join(aof_dir,new_aof_file)
+            with open(aof_filepath,'w') as f:
+                print(f'AOF file created by master......')
+            manifest_file_path=os.path.join(aof_dir,manifest_file)
+            with open(manifest_file_path,'w') as mf:
+                data_str=f'file {new_aof_file} seq 1 type i'
+                print("Manifest file created and data written = ",mf.write(data_str))
+            
         RedisAsyncServer.server.master_replid = '8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb'
         RedisAsyncServer.server.master_repl_offset = 0
         if RedisAsyncServer.server.rdb_dir and RedisAsyncServer.server.rdb_filename:
