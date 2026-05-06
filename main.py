@@ -9,12 +9,15 @@ import shutil
 from . import geo_encode
 from . import distance
 from . import hashing
+from . import utilities
 class User():
     def __init__(self):
         self.username='default'
         self.flags=['nopass']
         self.password=''
-user=User()
+        self.client_address=[]
+
+
 class RedisServer():
     def __init__(self,role='master',port=6379):
         self.port= port
@@ -24,7 +27,7 @@ class RedisServer():
         self.master_port=None
         self.data_store={}
         self.server=Master()
-        self.users=[user]
+        self.clients=[]
 
 class Replica():
     def __init__(self):
@@ -1275,11 +1278,13 @@ async def command_handler(writer,client_addr,server_role,query_string,input_toke
             print("response = ",response)
 
         elif data_list[0].upper() == 'ACL':
+            current_users=RedisAsyncServer.clients
             if data_list[1].upper() == 'WHOAMI':
+                
                 response = '$7\r\ndefault\r\n'
             elif data_list[1].upper() == 'GETUSER':
                 user_name=data_list[2]
-                user=RedisAsyncServer.users[0]
+                user=current_users[0]
                 flags=user.flags
                 if 'nopass' in flags:
                     response = '*4\r\n$5\r\nflags\r\n*1\r\n$6\r\nnopass\r\n$9\r\npasswords\r\n*0\r\n'
@@ -1291,26 +1296,29 @@ async def command_handler(writer,client_addr,server_role,query_string,input_toke
                 user_name=data_list[2]
                 if data_list[3].startswith('>'):
                     raw_password=str(data_list[3]).lstrip('>')
-                    current_users=RedisAsyncServer.users
+                    current_users=RedisAsyncServer.clients
                     for user in current_users:
                         if user.username == user_name:
-                            RedisAsyncServer.users.remove(user)
+                            RedisAsyncServer.clients.remove(user)
                             user.password = hashing.hash_password(raw_password)
                             flags=user.flags
                             if 'nopass' in flags:
                                 user.flags.remove('nopass') 
-                            RedisAsyncServer.users.append(user) 
+                            RedisAsyncServer.clients.append(user) 
                             break   
                 response='+OK\r\n'
         elif data_list[0].upper() == 'AUTH':
             #AUTH <username> <password>
             user_name=data_list[1]
             user_pass=data_list[2]
-            response='-WRONGPASS invalid username-password pair or user is disabled.\r\n'
-            for user in RedisAsyncServer.users:
+            response='-WRONGPASS invalid username-password pair or user is disabled.\r\n'            
+            for user in RedisAsyncServer.clients:
                 if user.username == user_name:
                     if user.password == hashing.hash_password(str(user_pass)):
                         response='+OK\r\n'
+                        if not utilities.client_exists(RedisAsyncServer.clients,client_addr):
+                            RedisAsyncServer.clients=utilities.add_client(user_name,RedisAsyncServer.clients,client_addr)
+
                         break                    
 
         elif data_list[0] == 'TYPE': 
@@ -1327,7 +1335,19 @@ async def command_handler(writer,client_addr,server_role,query_string,input_toke
 
 async def client_handler(reader,writer):
     try:
-        client_addr = writer.get_extra_info('peername')       
+        client_addr = writer.get_extra_info('peername')  
+        userobjs=RedisAsyncServer.clients  
+        print('current users=',userobjs)   
+        if len(userobjs) ==1 :
+            default_client=userobjs[0]
+            print("current user = ",default_client.username,type(default_client))
+            if default_client.username == 'default' :
+                if not hasattr(default_client, 'client_address') or not default_client.client_address:
+                    default_client.client_address = []
+                    default_client.client_address.append(client_addr)
+                    RedisAsyncServer.clients[0] = default_client 
+                
+                 
         
         print("Connected...",client_addr,RedisAsyncServer.role) 
         CONNECT = True
@@ -1336,10 +1356,25 @@ async def client_handler(reader,writer):
         MULTI=[False,deque()]
         while CONNECT:
             input_query=await reader.read(1024)
+            # if not utilities.allow_commands(userobjs,client_addr):
+            #     response='-NOAUTH Authentication required.\r\n'
+            #     writer.write(response.encode())
+            #     await writer.drain() 
+            #     continue 
+            # if not utilities.client_exists(users,client_addr):
+            #     new_user=User()
+            #     new_user.client_address = client_addr
+
             if not input_query:
                 await asyncio.sleep(0.2)
                 continue
             query_string=str(input_query.decode()) 
+            if not utilities.allow_commands(userobjs,client_addr):
+                if 'AUTH' not in query_string.splitlines():
+                    response='-NOAUTH Authentication required.\r\n'
+                    writer.write(response.encode())
+                    await writer.drain() 
+                    continue 
             print(">>>>>>>query_string : ",query_string)
             if query_string == '*2\r\n$4\r\nKEYS\r\n$3\r\n"*"\r\n':
                 if RedisAsyncServer.data_store:
@@ -1743,6 +1778,7 @@ def main():
             port_number=6379
     else:
         port_number=6379
+    RedisAsyncServer.clients.append(User())
     if '--replicaof' in sys.argv:
         try:
             RedisAsyncServer.role='slave'
